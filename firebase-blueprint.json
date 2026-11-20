@@ -2,14 +2,18 @@
   "entities": {
     "VaultEntry": {
       "title": "VaultEntry",
-      "description": "A saved link, single-page folder, or expandable/collapsible layer belonging to a user's JAYTINSTORE vault.",
+      "description": "A saved link, single-page folder, or expandable/collapsible layer in the JAYTINSTORE vault.",
       "type": "object",
       "properties": {
         "ownerId": {
           "type": "string",
-          "description": "Firebase Auth UID of the vault owner.",
+          "description": "Firebase Auth UID of the creator/owner.",
           "minLength": 1,
           "maxLength": 128
+        },
+        "isPublic": {
+          "type": "boolean",
+          "description": "Marks the entry as publicly readable for visitors without login."
         },
         "kind": {
           "type": "string",
@@ -62,6 +66,7 @@
       },
       "required": [
         "ownerId",
+        "isPublic",
         "kind",
         "columnId",
         "parentId",
@@ -84,6 +89,10 @@
           "description": "Firebase Auth UID of the vault owner.",
           "minLength": 1,
           "maxLength": 128
+        },
+        "isPublic": {
+          "type": "boolean",
+          "description": "Marks the column headings as publicly readable."
         },
         "creLabel": {
           "type": "string",
@@ -111,6 +120,7 @@
       },
       "required": [
         "ownerId",
+        "isPublic",
         "creLabel",
         "jayLabel",
         "otherLabel",
@@ -119,17 +129,29 @@
     }
   },
   "firestore": {
+    "/vault/{vaultId}/entries/{entryId}": {
+      "schema": {
+        "$ref": "#/entities/VaultEntry"
+      },
+      "description": "Publicly readable links, folders, and collapsible layers; only authenticated vault editors may write."
+    },
+    "/vault/{vaultId}/meta/{settingId}": {
+      "schema": {
+        "$ref": "#/entities/ColumnSettings"
+      },
+      "description": "Publicly readable customized column headings (document id: columns); only authenticated vault editors may write."
+    },
     "/users/{userId}/entries/{entryId}": {
       "schema": {
         "$ref": "#/entities/VaultEntry"
       },
-      "description": "Stores a user's links, folders, and collapsible layers."
+      "description": "Legacy per-user vault entries path kept owner-only for backward-compatible migration."
     },
     "/users/{userId}/meta/{settingId}": {
       "schema": {
         "$ref": "#/entities/ColumnSettings"
       },
-      "description": "Stores a user's customized column headings (document id: columns)."
+      "description": "Legacy per-user column settings path kept owner-only for backward-compatible migration."
     }
   }
 }

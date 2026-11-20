@@ -542,8 +542,16 @@ export function sortEntriesByOrder(entries: VaultEntry[]): VaultEntry[] {
   });
 }
 
+export const VAULT_EDITOR_EMAIL = 'm-10249244@moe-dl.edu.my';
+
+export function isAuthorizedEditorEmail(email?: string | null): boolean {
+  if (!email) return false;
+  return email.trim().toLowerCase() === VAULT_EDITOR_EMAIL.toLowerCase();
+}
+
 export interface FirestoreVaultEntryPayload<TTime = unknown> {
   ownerId: string;
+  isPublic: boolean;
   kind: EntryKind;
   columnId: ColumnId;
   parentId: string;
@@ -577,6 +585,7 @@ export function toFirestoreEntryCreatePayload<TTime>(
     const safeUrl = (normalizeUrl(entry.url) ?? 'https://example.com').slice(0, MAX_URL_LENGTH);
     return {
       ownerId,
+      isPublic: true,
       kind: 'link',
       columnId: isValidColumnId(entry.columnId) ? entry.columnId : 'OTHER',
       parentId: safeParentId,
@@ -595,6 +604,7 @@ export function toFirestoreEntryCreatePayload<TTime>(
 
   return {
     ownerId,
+    isPublic: true,
     kind: entry.kind,
     columnId: isValidColumnId(entry.columnId) ? entry.columnId : 'OTHER',
     parentId: safeParentId,
@@ -614,6 +624,7 @@ export function toFirestoreColumnPayload<TTime>(
   timestampValue: TTime
 ): {
   ownerId: string;
+  isPublic: boolean;
   creLabel: string;
   jayLabel: string;
   otherLabel: string;
@@ -624,6 +635,7 @@ export function toFirestoreColumnPayload<TTime>(
     (safe.find((c) => c.id === id)?.label ?? def).trim().slice(0, MAX_COLUMN_LABEL_LENGTH) || def;
   return {
     ownerId,
+    isPublic: true,
     creLabel: getLabel('CRE', 'CRE'),
     jayLabel: getLabel('JAY', 'JAY'),
     otherLabel: getLabel('OTHER', 'OTHER'),

@@ -6,6 +6,7 @@ import {
   extractDomain,
   filterEntries,
   fromFirestoreEntryDoc,
+  isAuthorizedEditorEmail,
   moveEntryInScope,
   moveEntryToScope,
   normalizeUrl,
@@ -161,6 +162,7 @@ test('Firestore payload mapping enforces blueprint constraints and sortOrder rou
   const indexed = withReindexedSortOrder(entries);
   const payload = toFirestoreEntryCreatePayload(indexed[1], 'user-1', 'SERVER_TS');
   assert.equal(payload.ownerId, 'user-1');
+  assert.equal(payload.isPublic, true);
   assert.equal(payload.title.length, 80);
   assert.equal(payload.url, 'https://example.com/path');
   assert.equal(payload.parentId, 'sec-1');
@@ -182,5 +184,11 @@ test('Firestore payload mapping enforces blueprint constraints and sortOrder rou
   );
   assert.equal(colPayload.creLabel.length, 24);
   assert.equal(colPayload.ownerId, 'user-1');
+  assert.equal(colPayload.isPublic, true);
+
+  assert.equal(isAuthorizedEditorEmail('m-10249244@moe-dl.edu.my'), true);
+  assert.equal(isAuthorizedEditorEmail('M-10249244@MOE-DL.EDU.MY '), true);
+  assert.equal(isAuthorizedEditorEmail('visitor@example.com'), false);
+  assert.equal(isAuthorizedEditorEmail(null), false);
 });
 

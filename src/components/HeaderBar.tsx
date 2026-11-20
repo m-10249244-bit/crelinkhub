@@ -5,6 +5,7 @@ import { StickerHeading } from './StickerHeading';
 interface HeaderBarProps {
   searchQuery: string;
   onSearchChange: (value: string) => void;
+  canEdit: boolean;
   isEditMode: boolean;
   onToggleEditMode: () => void;
   onOpenAddModal: () => void;
@@ -20,6 +21,7 @@ interface HeaderBarProps {
 export function HeaderBar({
   searchQuery,
   onSearchChange,
+  canEdit,
   isEditMode,
   onToggleEditMode,
   onOpenAddModal,
@@ -74,15 +76,19 @@ export function HeaderBar({
             </div>
           </div>
 
-          {/* Right Zone: Cloud Sign-in/out, Edit Mode, Manage, Add Link */}
-          <div className="order-3 w-full md:w-auto grid grid-cols-2 sm:grid-cols-4 md:flex items-center justify-end gap-2 shrink-0">
+          {/* Right Zone: Auth button + Editor controls (only shown when authorized) */}
+          <div
+            className={`order-3 w-full md:w-auto flex items-center justify-end gap-2 shrink-0 ${
+              canEdit ? 'grid grid-cols-2 sm:grid-cols-4 md:flex' : ''
+            }`}
+          >
             {authReady && (
               user ? (
                 <button
                   type="button"
                   onClick={onSignOut}
                   disabled={authBusy}
-                  title={`Cloud Synced: ${user.email ?? user.displayName ?? 'Google Account'} (click to sign out)`}
+                  title={`Signed in as ${user.email ?? user.displayName ?? 'Google Account'} (click to sign out)`}
                   className="inline-flex items-center justify-center gap-1.5 h-10 px-3 text-sm font-medium text-zinc-800 bg-white border border-zinc-300 rounded-lg hover:border-black hover:text-black transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-black"
                 >
                   <LogOut className="h-3.5 w-3.5" aria-hidden="true" />
@@ -93,52 +99,57 @@ export function HeaderBar({
                   type="button"
                   onClick={onSignIn}
                   disabled={authBusy}
-                  title="Sign in with Google to sync your links across devices"
-                  className="inline-flex items-center justify-center gap-1.5 h-10 px-3 text-sm font-medium text-zinc-800 bg-white border border-zinc-300 rounded-lg hover:border-black hover:text-black transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-black"
+                  title="Sign in with Google to edit links"
+                  className="inline-flex items-center justify-center gap-1.5 h-10 px-3.5 text-sm font-medium text-zinc-800 bg-white border border-zinc-300 rounded-lg hover:border-black hover:text-black transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-black"
                 >
                   <Cloud className="h-4 w-4" aria-hidden="true" />
                   <span>{authBusy ? 'Signing in...' : 'Sign in'}</span>
                 </button>
               )
             )}
-            <button
-              type="button"
-              onClick={onToggleEditMode}
-              aria-pressed={isEditMode}
-              className={`inline-flex items-center justify-center gap-1.5 h-10 px-3 text-sm font-semibold rounded-lg border transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-black ${
-                isEditMode
-                  ? 'bg-zinc-900 text-white border-black'
-                  : 'bg-white text-zinc-800 border-zinc-300 hover:border-black hover:text-black'
-              }`}
-            >
-              {isEditMode ? (
-                <>
-                  <Check className="h-4 w-4" aria-hidden="true" />
-                  <span>Done</span>
-                </>
-              ) : (
-                <>
-                  <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
-                  <span>Edit Mode</span>
-                </>
-              )}
-            </button>
-            <button
-              type="button"
-              onClick={onOpenBackupModal}
-              className="inline-flex items-center justify-center gap-1.5 h-10 px-3 text-sm font-medium text-zinc-800 bg-white border border-zinc-300 rounded-lg hover:border-black hover:text-black transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-black"
-            >
-              <FolderArchive className="h-4 w-4" aria-hidden="true" />
-              <span>Manage</span>
-            </button>
-            <button
-              type="button"
-              onClick={onOpenAddModal}
-              className="inline-flex items-center justify-center gap-1.5 h-10 px-3.5 text-sm font-semibold text-white bg-black rounded-lg hover:bg-zinc-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-black"
-            >
-              <Plus className="h-4 w-4" aria-hidden="true" />
-              <span>Add Link</span>
-            </button>
+
+            {canEdit && (
+              <>
+                <button
+                  type="button"
+                  onClick={onToggleEditMode}
+                  aria-pressed={isEditMode}
+                  className={`inline-flex items-center justify-center gap-1.5 h-10 px-3 text-sm font-semibold rounded-lg border transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-black ${
+                    isEditMode
+                      ? 'bg-zinc-900 text-white border-black'
+                      : 'bg-white text-zinc-800 border-zinc-300 hover:border-black hover:text-black'
+                  }`}
+                >
+                  {isEditMode ? (
+                    <>
+                      <Check className="h-4 w-4" aria-hidden="true" />
+                      <span>Done</span>
+                    </>
+                  ) : (
+                    <>
+                      <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>Edit Mode</span>
+                    </>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={onOpenBackupModal}
+                  className="inline-flex items-center justify-center gap-1.5 h-10 px-3 text-sm font-medium text-zinc-800 bg-white border border-zinc-300 rounded-lg hover:border-black hover:text-black transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-black"
+                >
+                  <FolderArchive className="h-4 w-4" aria-hidden="true" />
+                  <span>Manage</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={onOpenAddModal}
+                  className="inline-flex items-center justify-center gap-1.5 h-10 px-3.5 text-sm font-semibold text-white bg-black rounded-lg hover:bg-zinc-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-black"
+                >
+                  <Plus className="h-4 w-4" aria-hidden="true" />
+                  <span>Add Link</span>
+                </button>
+              </>
+            )}
           </div>
         </div>
       </div>

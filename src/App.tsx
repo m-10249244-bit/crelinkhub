@@ -9,14 +9,15 @@ import { StickerHeading } from './components/StickerHeading';
 import { WatermarkBackground } from './components/WatermarkBackground';
 import { auth, googleProvider } from './firebase';
 import {
+  checkUserEditorAccess,
   createVaultEntryInCloud,
   deleteVaultEntriesInCloud,
-  migrateLocalDataIfCloudEmpty,
+  initializePublicVaultIfNeeded,
   reorderVaultEntriesInCloud,
   replaceAllVaultDataInCloud,
   saveColumnsToCloud,
-  subscribeToColumnSettings,
-  subscribeToVaultEntries,
+  subscribeToPublicColumnSettings,
+  subscribeToPublicVaultEntries,
   toggleSectionInCloud,
   trackLinkClickInCloud,
   updateVaultEntryDetailsInCloud,
@@ -49,7 +50,7 @@ import {
 const LINKS_STORAGE_KEY = 'jaytinstore.links.v1';
 const COLUMNS_STORAGE_KEY = 'jaytinstore.columns.v1';
 
-function loadInitialEntries(): VaultEntry[] {
+function loadFallbackEntries(): VaultEntry[] {
   try {
     const raw = localStorage.getItem(LINKS_STORAGE_KEY);
     if (raw === null) {
@@ -65,7 +66,7 @@ function loadInitialEntries(): VaultEntry[] {
   return SEED_ENTRIES;
 }
 
-function loadInitialColumns(): ColumnConfig[] {
+function loadFallbackColumns(): ColumnConfig[] {
   try {
     const raw = localStorage.getItem(COLUMNS_STORAGE_KEY);
     if (!raw) return DEFAULT_COLUMNS;
@@ -76,8 +77,10 @@ function loadInitialColumns(): ColumnConfig[] {
 }
 
 export default function App() {
-  const [entries, setEntries] = useState<VaultEntry[]>(loadInitialEntries);
-  const [columns, setColumns] = useState<ColumnConfig[]>(loadInitialColumns);
+  const [entries, setEntries] = useState<VaultEntry[]>(loadFallbackEntries);
+  const [columns, setColumns] = useState<ColumnConfig[]>(loadFallbackColumns);
+  const [cloudMetaInitialized, setCloudMetaInitialized] = useState(false);
+  const [localSectionOpenMap, setLocalSectionOpenMap] = useState<Record<string, boolean>>({});
   const [searchQuery, setSearchQuery] = useState('');
   const [mobileColumn, setMobileColumn] = useState<ColumnId>('CRE');
   const [isEditMode, setIsEditMode] = useState(false);
@@ -85,7 +88,7 @@ export default function App() {
   // Single-page Folder navigation state
   const [activeFolderId, setActiveFolderId] = useState<string | null>(null);
 
-  // Drag-and-drop state (active in Edit Mode)
+  // Drag-and-drop state (active in Edit Mode when signed in as editor)
   const [draggedId, setDraggedId] = useState<string | null>(null);
   const [dragOverId, setDragOverId] = useState<string | null>(null);
   const [dragOverColumnId, setDragOverColumnId] = useState<ColumnId | null>(null);
@@ -100,115 +103,138 @@ export default function App() {
   // Manage / Backup modal state
   const [backupModalOpen, setBackupModalOpen] = useState(false);
 
-  // Firebase Auth & Cloud Sync state
+  // Firebase Auth & Editor Authorization state
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
+  const [hasEditorAccess, setHasEditorAccess] = useState(false);
   const [authBusy, setAuthBusy] = useState(false);
   const [authNotice, setAuthNotice] = useState<string | null>(null);
   const [asyncError, setAsyncError] = useState<Error | null>(null);
-  const migratedUidRef = useRef<Set<string>>(new Set());
+  const initializedUidRef = useRef<Set<string>>(new Set());
+  const cloudInitializedRef = useRef(false);
 
   if (asyncError) {
     throw asyncError;
   }
 
-  const isCloudActive = Boolean(user && user.emailVerified);
+  const canEdit = Boolean(user && user.emailVerified && hasEditorAccess);
+  const effectiveEditMode = canEdit && isEditMode;
 
+  // Always subscribe to public-read vault data so visitors without login can view all links
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (nextUser) => {
-      setUser(nextUser);
-      setAuthReady(true);
-      if (nextUser && !nextUser.emailVerified) {
-        setAuthNotice('Please verify your Google account email to enable cloud sync.');
-      } else {
-        setAuthNotice(null);
-      }
-      if (!nextUser) {
-        setEntries(loadInitialEntries());
-        setColumns(loadInitialColumns());
-      }
-    });
-    return () => unsubscribe();
-  }, []);
-
-  useEffect(() => {
-    if (!user || !user.emailVerified) return;
-    const uid = user.uid;
-
-    let cancelled = false;
-    let unsubEntries: (() => void) | undefined;
-    let unsubColumns: (() => void) | undefined;
-
-    const startSync = async () => {
-      if (!migratedUidRef.current.has(uid)) {
-        migratedUidRef.current.add(uid);
-        try {
-          await migrateLocalDataIfCloudEmpty(uid, entries, columns);
-        } catch (err) {
-          if (!cancelled) {
-            setAsyncError(err instanceof Error ? err : new Error(String(err)));
-          }
-          return;
-        }
-      }
-
-      if (cancelled) return;
-
-      unsubEntries = subscribeToVaultEntries(
-        uid,
-        (cloudEntries) => {
+    const unsubEntries = subscribeToPublicVaultEntries(
+      (cloudEntries) => {
+        if (cloudEntries.length > 0 || cloudInitializedRef.current) {
           setEntries(cloudEntries);
-        },
-        (err) => setAsyncError(err)
-      );
+        }
+      },
+      (err) => setAsyncError(err)
+    );
 
-      unsubColumns = subscribeToColumnSettings(
-        uid,
-        (cloudColumns) => {
+    const unsubColumns = subscribeToPublicColumnSettings(
+      (cloudColumns, initialized) => {
+        cloudInitializedRef.current = initialized;
+        setCloudMetaInitialized(initialized);
+        if (initialized) {
           setColumns(cloudColumns);
-        },
-        (err) => setAsyncError(err)
-      );
-    };
-
-    void startSync();
+        }
+      },
+      (err) => setAsyncError(err)
+    );
 
     return () => {
-      cancelled = true;
-      unsubEntries?.();
-      unsubColumns?.();
+      unsubEntries();
+      unsubColumns();
     };
-    // Intentionally keyed to authenticated verified UID so initial local entries snapshot is migrated once on sign-in
+  }, []);
+
+  // Track Firebase Auth state & editor authorization
+  useEffect(() => {
+    let active = true;
+    const unsubscribe = onAuthStateChanged(auth, async (nextUser) => {
+      if (!active) return;
+      setUser(nextUser);
+
+      if (!nextUser) {
+        setHasEditorAccess(false);
+        setIsEditMode(false);
+        setModalOpen(false);
+        setBackupModalOpen(false);
+        setEditingEntry(null);
+        setAuthNotice(null);
+        setAuthReady(true);
+        return;
+      }
+
+      if (!nextUser.emailVerified) {
+        setHasEditorAccess(false);
+        setIsEditMode(false);
+        setAuthNotice('Please verify your Google account email to edit links.');
+        setAuthReady(true);
+        return;
+      }
+
+      try {
+        const allowed = await checkUserEditorAccess(nextUser);
+        if (!active) return;
+        setHasEditorAccess(allowed);
+        setAuthReady(true);
+        if (!allowed) {
+          setIsEditMode(false);
+          setModalOpen(false);
+          setBackupModalOpen(false);
+          setAuthNotice(
+            `Signed in as ${nextUser.email ?? 'guest'} (view-only). Only the vault owner can edit.`
+          );
+        } else {
+          setAuthNotice(null);
+        }
+      } catch (err) {
+        if (!active) return;
+        setAsyncError(err instanceof Error ? err : new Error(String(err)));
+      }
+    });
+
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, []);
+
+  // Initialize / migrate public vault once when an authorized editor signs in
+  useEffect(() => {
+    if (!canEdit || !user) return;
+    if (initializedUidRef.current.has(user.uid)) return;
+    initializedUidRef.current.add(user.uid);
+
+    void initializePublicVaultIfNeeded(user.uid, entries, columns).catch((err) => {
+      setAsyncError(err instanceof Error ? err : new Error(String(err)));
+    });
+    // Intentionally keyed to verified editor UID for one-time initialization
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.uid, user?.emailVerified]);
+  }, [canEdit, user?.uid]);
 
-  useEffect(() => {
-    if (isCloudActive) return;
-    try {
-      localStorage.setItem(LINKS_STORAGE_KEY, JSON.stringify(entries));
-    } catch {
-      // Ignore storage quota errors
+  // Apply local expand/collapse overrides when visitors browse without edit rights
+  const displayEntries = useMemo(() => {
+    if (canEdit || Object.keys(localSectionOpenMap).length === 0) {
+      return entries;
     }
-  }, [entries, isCloudActive]);
-
-  useEffect(() => {
-    if (isCloudActive) return;
-    try {
-      localStorage.setItem(COLUMNS_STORAGE_KEY, JSON.stringify(columns));
-    } catch {
-      // Ignore storage quota errors
-    }
-  }, [columns, isCloudActive]);
+    return entries.map((item) =>
+      item.kind === 'section' && item.id in localSectionOpenMap
+        ? { ...item, isOpen: localSectionOpenMap[item.id] }
+        : item
+    );
+  }, [canEdit, entries, localSectionOpenMap]);
 
   // If the active folder was deleted or removed, return safely to main 3-column view
   const activeFolder = useMemo(
     () =>
       activeFolderId
-        ? (entries.find(
+        ? (displayEntries.find(
             (e): e is FolderEntry => e.id === activeFolderId && e.kind === 'folder'
           ) ?? null)
         : null,
-    [activeFolderId, entries]
+    [activeFolderId, displayEntries]
   );
 
   useEffect(() => {
@@ -218,8 +244,8 @@ export default function App() {
   }, [activeFolderId, activeFolder]);
 
   const filteredEntries = useMemo(
-    () => filterEntries(entries, searchQuery),
-    [entries, searchQuery]
+    () => filterEntries(displayEntries, searchQuery),
+    [displayEntries, searchQuery]
   );
 
   const isSearching = searchQuery.trim().length > 0;
@@ -229,6 +255,7 @@ export default function App() {
     parentId: string | null = null,
     kind: EntryKind = 'link'
   ) => {
+    if (!canEdit) return;
     setEditingEntry(null);
     setModalColumnId(columnId);
     setModalParentId(parentId);
@@ -237,6 +264,7 @@ export default function App() {
   };
 
   const openEditModal = (entry: VaultEntry) => {
+    if (!canEdit) return;
     setEditingEntry(entry);
     setModalColumnId(entry.columnId);
     setModalParentId(entry.parentId ?? null);
@@ -274,6 +302,7 @@ export default function App() {
     setAuthNotice(null);
     try {
       await signOut(auth);
+      setIsEditMode(false);
       setActiveFolderId(null);
     } catch (err) {
       setAuthNotice(
@@ -291,6 +320,7 @@ export default function App() {
   };
 
   const handleSaveEntry = (input: EntryFormInput, editingId?: string) => {
+    if (!canEdit || !user) return;
     const cleanedTitle = input.title.trim();
     const nextSortOrder =
       entries.reduce((max, item) => Math.max(max, item.sortOrder ?? -1), -1) + 1;
@@ -315,9 +345,7 @@ export default function App() {
         setEntries((prev) =>
           prev.map((item) => (item.id === editingId ? updated : item))
         );
-        if (isCloudActive && user) {
-          runCloudTask(updateVaultEntryDetailsInCloud(user.uid, updated));
-        }
+        runCloudTask(updateVaultEntryDetailsInCloud(updated));
       } else {
         const newLink: VaultEntry = {
           id: `link-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -331,9 +359,7 @@ export default function App() {
           createdAt: Date.now(),
         };
         setEntries((prev) => [...prev, newLink]);
-        if (isCloudActive && user) {
-          runCloudTask(createVaultEntryInCloud(user.uid, newLink, nextSortOrder));
-        }
+        runCloudTask(createVaultEntryInCloud(user.uid, newLink, nextSortOrder));
       }
     } else if (input.kind === 'folder') {
       if (editingId) {
@@ -350,9 +376,7 @@ export default function App() {
         setEntries((prev) =>
           prev.map((item) => (item.id === editingId ? updated : item))
         );
-        if (isCloudActive && user) {
-          runCloudTask(updateVaultEntryDetailsInCloud(user.uid, updated));
-        }
+        runCloudTask(updateVaultEntryDetailsInCloud(updated));
       } else {
         const newFolder: VaultEntry = {
           id: `folder-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -364,9 +388,7 @@ export default function App() {
           createdAt: Date.now(),
         };
         setEntries((prev) => [...prev, newFolder]);
-        if (isCloudActive && user) {
-          runCloudTask(createVaultEntryInCloud(user.uid, newFolder, nextSortOrder));
-        }
+        runCloudTask(createVaultEntryInCloud(user.uid, newFolder, nextSortOrder));
       }
     } else {
       if (editingId) {
@@ -384,9 +406,7 @@ export default function App() {
         setEntries((prev) =>
           prev.map((item) => (item.id === editingId ? updated : item))
         );
-        if (isCloudActive && user) {
-          runCloudTask(updateVaultEntryDetailsInCloud(user.uid, updated));
-        }
+        runCloudTask(updateVaultEntryDetailsInCloud(updated));
       } else {
         const newSection: VaultEntry = {
           id: `section-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -399,9 +419,7 @@ export default function App() {
           createdAt: Date.now(),
         };
         setEntries((prev) => [...prev, newSection]);
-        if (isCloudActive && user) {
-          runCloudTask(createVaultEntryInCloud(user.uid, newSection, nextSortOrder));
-        }
+        runCloudTask(createVaultEntryInCloud(user.uid, newSection, nextSortOrder));
       }
     }
 
@@ -410,6 +428,7 @@ export default function App() {
   };
 
   const handleDeleteEntry = (entry: VaultEntry) => {
+    if (!canEdit) return;
     const next = deleteEntryCascade(entries, entry.id);
     const remainingIds = new Set(next.map((item) => item.id));
     const deletedIds = entries
@@ -417,12 +436,13 @@ export default function App() {
       .map((item) => item.id);
 
     setEntries(next);
-    if (isCloudActive && user && deletedIds.length > 0) {
-      runCloudTask(deleteVaultEntriesInCloud(user.uid, deletedIds));
+    if (deletedIds.length > 0) {
+      runCloudTask(deleteVaultEntriesInCloud(deletedIds));
     }
   };
 
   const handleTrackClick = (id: string) => {
+    if (!canEdit) return;
     setEntries((prev) =>
       prev.map((item) =>
         item.id === id && item.kind === 'link'
@@ -430,17 +450,21 @@ export default function App() {
           : item
       )
     );
-    if (isCloudActive && user) {
-      runCloudTask(trackLinkClickInCloud(user.uid, id));
-    }
+    runCloudTask(trackLinkClickInCloud(id));
   };
 
   const handleToggleSection = (id: string) => {
-    const target = entries.find(
+    const target = displayEntries.find(
       (item): item is SectionEntry => item.id === id && item.kind === 'section'
     );
     if (!target) return;
     const nextOpen = !target.isOpen;
+
+    if (!canEdit) {
+      setLocalSectionOpenMap((prev) => ({ ...prev, [id]: nextOpen }));
+      return;
+    }
+
     setEntries((prev) =>
       prev.map((item) =>
         item.id === id && item.kind === 'section'
@@ -448,12 +472,11 @@ export default function App() {
           : item
       )
     );
-    if (isCloudActive && user) {
-      runCloudTask(toggleSectionInCloud(user.uid, id, nextOpen));
-    }
+    runCloudTask(toggleSectionInCloud(id, nextOpen));
   };
 
   const commitReorderedEntries = (nextList: VaultEntry[]) => {
+    if (!canEdit) return;
     const reindexed = withReindexedSortOrder(nextList);
     const prevMap = new Map(entries.map((item) => [item.id, item]));
     const changed = reindexed.filter((item) => {
@@ -467,10 +490,9 @@ export default function App() {
     });
 
     setEntries(reindexed);
-    if (isCloudActive && user && changed.length > 0) {
+    if (changed.length > 0) {
       runCloudTask(
         reorderVaultEntriesInCloud(
-          user.uid,
           changed.map((item) => ({
             id: item.id,
             columnId: item.columnId,
@@ -484,6 +506,7 @@ export default function App() {
   };
 
   const handleMoveEntry = (id: string, direction: 'up' | 'down') => {
+    if (!canEdit) return;
     commitReorderedEntries(moveEntryInScope(entries, id, direction));
   };
 
@@ -496,6 +519,10 @@ export default function App() {
   const handleDropOnSlot = (e: React.DragEvent, targetId: string) => {
     e.preventDefault();
     e.stopPropagation();
+    if (!canEdit) {
+      clearDragState();
+      return;
+    }
     const sourceId = draggedId || e.dataTransfer.getData('text/plain');
     if (sourceId && sourceId !== targetId) {
       commitReorderedEntries(reorderEntryOntoTarget(entries, sourceId, targetId));
@@ -509,6 +536,10 @@ export default function App() {
     parentId: string | null = null
   ) => {
     e.preventDefault();
+    if (!canEdit) {
+      clearDragState();
+      return;
+    }
     const sourceId = draggedId || e.dataTransfer.getData('text/plain');
     if (sourceId) {
       commitReorderedEntries(
@@ -533,12 +564,13 @@ export default function App() {
   }, [editingEntry, entries]);
 
   const totalLinksCount = useMemo(
-    () => entries.filter((e) => e.kind === 'link').length,
-    [entries]
+    () => displayEntries.filter((e) => e.kind === 'link').length,
+    [displayEntries]
   );
 
   const sharedRowHandlers = {
-    isEditMode,
+    canEdit,
+    isEditMode: effectiveEditMode,
     draggedId,
     dragOverId,
     onTrackClick: handleTrackClick,
@@ -552,8 +584,11 @@ export default function App() {
     onEdit: openEditModal,
     onDelete: handleDeleteEntry,
     onMove: handleMoveEntry,
-    onDragStart: (id: string) => setDraggedId(id),
+    onDragStart: (id: string) => {
+      if (canEdit) setDraggedId(id);
+    },
     onDragOverSlot: (e: React.DragEvent, id: string) => {
+      if (!effectiveEditMode) return;
       e.preventDefault();
       e.stopPropagation();
       setDragOverId(id);
@@ -569,8 +604,10 @@ export default function App() {
       <HeaderBar
         searchQuery={searchQuery}
         onSearchChange={setSearchQuery}
-        isEditMode={isEditMode}
+        canEdit={canEdit}
+        isEditMode={effectiveEditMode}
         onToggleEditMode={() => {
+          if (!canEdit) return;
           setIsEditMode((prev) => !prev);
           clearDragState();
         }}
@@ -579,7 +616,9 @@ export default function App() {
             ? openAddModal(activeFolder.columnId, activeFolder.id, 'link')
             : openAddModal(mobileColumn, null, 'link')
         }
-        onOpenBackupModal={() => setBackupModalOpen(true)}
+        onOpenBackupModal={() => {
+          if (canEdit) setBackupModalOpen(true);
+        }}
         totalLinks={totalLinksCount}
         user={user}
         authReady={authReady}
@@ -605,7 +644,7 @@ export default function App() {
         </div>
       )}
 
-      {isEditMode && (
+      {effectiveEditMode && (
         <div
           role="status"
           className="relative z-10 border-b border-zinc-300 bg-zinc-100/95 px-4 py-2 text-center text-xs font-medium text-zinc-800"
@@ -633,13 +672,15 @@ export default function App() {
                   >
                     Clear Search
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => openAddModal('CRE', null, 'link')}
-                    className="h-10 px-4 text-sm font-medium text-zinc-800 bg-white border border-zinc-300 rounded-xl hover:border-black cursor-pointer"
-                  >
-                    Add New Link
-                  </button>
+                  {canEdit && (
+                    <button
+                      type="button"
+                      onClick={() => openAddModal('CRE', null, 'link')}
+                      className="h-10 px-4 text-sm font-medium text-zinc-800 bg-white border border-zinc-300 rounded-xl hover:border-black cursor-pointer"
+                    >
+                      Add New Link
+                    </button>
+                  )}
                 </div>
               </div>
             </div>
@@ -663,7 +704,7 @@ export default function App() {
                     columns.find((c) => c.id === entry.columnId)?.label ??
                     entry.columnId;
                   const parentLabel = entry.parentId
-                    ? entries.find((e) => e.id === entry.parentId)?.title
+                    ? displayEntries.find((e) => e.id === entry.parentId)?.title
                     : null;
                   return (
                     <div key={entry.id} className="space-y-1">
@@ -673,7 +714,7 @@ export default function App() {
                       </p>
                       <EntryRow
                         entry={entry}
-                        allEntries={entries}
+                        allEntries={displayEntries}
                         canMoveUp={false}
                         canMoveDown={false}
                         disableReorder
@@ -689,11 +730,11 @@ export default function App() {
           /* Single-Page Folder View */
           <div
             onDragOver={(e) => {
-              if (!isEditMode) return;
+              if (!effectiveEditMode) return;
               e.preventDefault();
             }}
             onDrop={(e) => {
-              if (!isEditMode) return;
+              if (!effectiveEditMode) return;
               handleDropOnScope(e, activeFolder.columnId, activeFolder.id);
             }}
             className="flex-1 flex flex-col"
@@ -721,23 +762,27 @@ export default function App() {
                   </h2>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={() =>
-                    openAddModal(activeFolder.columnId, activeFolder.id, 'link')
-                  }
-                  className="inline-flex items-center gap-1.5 h-9 px-3.5 text-sm font-semibold text-white bg-black rounded-xl hover:bg-zinc-800 cursor-pointer whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-black"
-                >
-                  <Plus className="h-4 w-4" aria-hidden="true" />
-                  <span>Add</span>
-                </button>
+                {canEdit ? (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      openAddModal(activeFolder.columnId, activeFolder.id, 'link')
+                    }
+                    className="inline-flex items-center gap-1.5 h-9 px-3.5 text-sm font-semibold text-white bg-black rounded-xl hover:bg-zinc-800 cursor-pointer whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-black"
+                  >
+                    <Plus className="h-4 w-4" aria-hidden="true" />
+                    <span>Add</span>
+                  </button>
+                ) : (
+                  <div className="w-[76px] shrink-0" aria-hidden="true" />
+                )}
               </div>
             </div>
 
             {/* Single-page Folder Contents */}
             <div className="mx-auto w-full max-w-2xl px-5 sm:px-8 py-6 space-y-4">
               {(() => {
-                const folderItems = getFolderChildren(entries, activeFolder.id);
+                const folderItems = getFolderChildren(displayEntries, activeFolder.id);
                 const emptyFolderSlots = Math.max(
                   0,
                   MIN_SLOTS_IN_FOLDER - folderItems.length
@@ -749,7 +794,7 @@ export default function App() {
                       <EntryRow
                         key={entry.id}
                         entry={entry}
-                        allEntries={entries}
+                        allEntries={displayEntries}
                         canMoveUp={idx > 0}
                         canMoveDown={idx < folderItems.length - 1}
                         {...sharedRowHandlers}
@@ -761,6 +806,7 @@ export default function App() {
                         key={`folder-empty-${idx}`}
                         label={activeFolder.title}
                         slotIndex={folderItems.length + idx}
+                        canEdit={canEdit}
                         onAdd={() =>
                           openAddModal(
                             activeFolder.columnId,
@@ -787,7 +833,7 @@ export default function App() {
               >
                 {columns.map((col) => {
                   const active = mobileColumn === col.id;
-                  const count = getScopeEntries(entries, col.id, null).length;
+                  const count = getScopeEntries(displayEntries, col.id, null).length;
                   return (
                     <button
                       key={col.id}
@@ -810,14 +856,14 @@ export default function App() {
 
             <div className="flex-1 grid grid-cols-1 md:grid-cols-3">
               {columns.map((col, colIndex) => {
-                const colEntries = getScopeEntries(entries, col.id, null);
+                const colEntries = getScopeEntries(displayEntries, col.id, null);
                 const emptyCount = Math.max(
                   0,
                   MIN_SLOTS_PER_COLUMN - colEntries.length
                 );
                 const isLastCol = colIndex === columns.length - 1;
                 const isVisibleOnMobile = mobileColumn === col.id;
-                const isDropHighlight = isEditMode && dragOverColumnId === col.id;
+                const isDropHighlight = effectiveEditMode && dragOverColumnId === col.id;
 
                 return (
                   <section
@@ -825,7 +871,7 @@ export default function App() {
                     aria-label={`${col.label} links column`}
                     data-testid={`column-${col.id}`}
                     onDragOver={(e) => {
-                      if (!isEditMode) return;
+                      if (!effectiveEditMode) return;
                       e.preventDefault();
                       setDragOverColumnId(col.id);
                     }}
@@ -837,7 +883,7 @@ export default function App() {
                       }
                     }}
                     onDrop={(e) => {
-                      if (!isEditMode) return;
+                      if (!effectiveEditMode) return;
                       handleDropOnScope(e, col.id, null);
                     }}
                     className={`flex-col transition-colors ${
@@ -849,7 +895,7 @@ export default function App() {
                     {/* Column Header Row */}
                     <div className="relative flex items-center justify-center px-6 py-3.5 border-b-[3px] border-black bg-white/55">
                       <StickerHeading text={col.label} as="h2" size="md" />
-                      {isEditMode && (
+                      {effectiveEditMode && (
                         <button
                           type="button"
                           onClick={() => openAddModal(col.id, null, 'link')}
@@ -868,7 +914,7 @@ export default function App() {
                         <EntryRow
                           key={entry.id}
                           entry={entry}
-                          allEntries={entries}
+                          allEntries={displayEntries}
                           canMoveUp={idx > 0}
                           canMoveDown={idx < colEntries.length - 1}
                           {...sharedRowHandlers}
@@ -880,6 +926,7 @@ export default function App() {
                           key={`${col.id}-empty-${idx}`}
                           label={col.label}
                           slotIndex={colEntries.length + idx}
+                          canEdit={canEdit}
                           onAdd={() => openAddModal(col.id, null, 'link')}
                         />
                       ))}
@@ -892,67 +939,71 @@ export default function App() {
         )}
       </main>
 
-      <LinkModal
-        isOpen={modalOpen}
-        columns={columns}
-        allEntries={entries}
-        initialColumnId={modalColumnId}
-        initialParentId={modalParentId}
-        initialKind={modalInitialKind}
-        editingEntry={editingEntry}
-        canMoveUp={editingScopePosition.canMoveUp}
-        canMoveDown={editingScopePosition.canMoveDown}
-        onMove={handleMoveEntry}
-        onDelete={handleDeleteEntry}
-        onClose={() => {
-          setModalOpen(false);
-          setEditingEntry(null);
-        }}
-        onSave={handleSaveEntry}
-      />
+      {canEdit && (
+        <>
+          <LinkModal
+            isOpen={modalOpen}
+            columns={columns}
+            allEntries={entries}
+            initialColumnId={modalColumnId}
+            initialParentId={modalParentId}
+            initialKind={modalInitialKind}
+            editingEntry={editingEntry}
+            canMoveUp={editingScopePosition.canMoveUp}
+            canMoveDown={editingScopePosition.canMoveDown}
+            onMove={handleMoveEntry}
+            onDelete={handleDeleteEntry}
+            onClose={() => {
+              setModalOpen(false);
+              setEditingEntry(null);
+            }}
+            onSave={handleSaveEntry}
+          />
 
-      <BackupModal
-        isOpen={backupModalOpen}
-        entries={entries}
-        columns={columns}
-        user={user}
-        authBusy={authBusy}
-        onSignIn={handleSignIn}
-        onSignOut={handleSignOut}
-        onClose={() => setBackupModalOpen(false)}
-        onUpdateColumns={(nextCols) => {
-          setColumns(nextCols);
-          if (isCloudActive && user) {
-            runCloudTask(saveColumnsToCloud(user.uid, nextCols));
-          }
-        }}
-        onImportData={({ entries: nextEntries, columns: nextCols }) => {
-          const indexed = withReindexedSortOrder(nextEntries);
-          setEntries(indexed);
-          setColumns(nextCols);
-          if (isCloudActive && user) {
-            runCloudTask(replaceAllVaultDataInCloud(user.uid, indexed, nextCols));
-          }
-        }}
-        onClearAll={() => {
-          setEntries([]);
-          setActiveFolderId(null);
-          if (isCloudActive && user) {
-            runCloudTask(replaceAllVaultDataInCloud(user.uid, []));
-          }
-        }}
-        onResetSamples={() => {
-          const indexed = withReindexedSortOrder(SEED_ENTRIES);
-          setEntries(indexed);
-          setColumns(DEFAULT_COLUMNS);
-          setActiveFolderId(null);
-          if (isCloudActive && user) {
-            runCloudTask(
-              replaceAllVaultDataInCloud(user.uid, indexed, DEFAULT_COLUMNS)
-            );
-          }
-        }}
-      />
+          <BackupModal
+            isOpen={backupModalOpen}
+            entries={entries}
+            columns={columns}
+            user={user}
+            authBusy={authBusy}
+            onSignIn={handleSignIn}
+            onSignOut={handleSignOut}
+            onClose={() => setBackupModalOpen(false)}
+            onUpdateColumns={(nextCols) => {
+              setColumns(nextCols);
+              if (user) {
+                runCloudTask(saveColumnsToCloud(user.uid, nextCols));
+              }
+            }}
+            onImportData={({ entries: nextEntries, columns: nextCols }) => {
+              const indexed = withReindexedSortOrder(nextEntries);
+              setEntries(indexed);
+              setColumns(nextCols);
+              if (user) {
+                runCloudTask(replaceAllVaultDataInCloud(user.uid, indexed, nextCols));
+              }
+            }}
+            onClearAll={() => {
+              setEntries([]);
+              setActiveFolderId(null);
+              if (user) {
+                runCloudTask(replaceAllVaultDataInCloud(user.uid, []));
+              }
+            }}
+            onResetSamples={() => {
+              const indexed = withReindexedSortOrder(SEED_ENTRIES);
+              setEntries(indexed);
+              setColumns(DEFAULT_COLUMNS);
+              setActiveFolderId(null);
+              if (user) {
+                runCloudTask(
+                  replaceAllVaultDataInCloud(user.uid, indexed, DEFAULT_COLUMNS)
+                );
+              }
+            }}
+          />
+        </>
+      )}
     </div>
   );
 }

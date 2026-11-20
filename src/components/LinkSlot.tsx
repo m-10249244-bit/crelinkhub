@@ -20,6 +20,7 @@ import {
 } from '../utils/links';
 
 interface SharedEditHandlers {
+  canEdit: boolean;
   isEditMode: boolean;
   draggedId: string | null;
   dragOverId: string | null;
@@ -110,6 +111,7 @@ export function EntryRow(props: EntryRowProps) {
     canMoveUp,
     canMoveDown,
     disableReorder = false,
+    canEdit,
     isEditMode,
     draggedId,
     dragOverId,
@@ -126,10 +128,11 @@ export function EntryRow(props: EntryRowProps) {
     onDragEnd,
   } = props;
 
+  const effectiveEditMode = canEdit && isEditMode;
   const isDragging = draggedId === entry.id;
   const isDragTarget = dragOverId === entry.id && draggedId !== entry.id;
 
-  const dragProps = isEditMode
+  const dragProps = effectiveEditMode
     ? {
         draggable: true,
         onDragStart: (e: React.DragEvent) => {
@@ -149,7 +152,7 @@ export function EntryRow(props: EntryRowProps) {
     const link: LinkEntry = entry;
     const domain = extractDomain(link.url);
 
-    if (!isEditMode) {
+    if (!effectiveEditMode) {
       return (
         <a
           href={link.url}
@@ -211,7 +214,7 @@ export function EntryRow(props: EntryRowProps) {
     const folder: FolderEntry = entry;
     const itemCount = countDescendantLinks(allEntries, folder.id);
 
-    if (!isEditMode) {
+    if (!effectiveEditMode) {
       return (
         <button
           type="button"
@@ -278,7 +281,7 @@ export function EntryRow(props: EntryRowProps) {
 
   return (
     <div className="space-y-2.5">
-      {!isEditMode ? (
+      {!effectiveEditMode ? (
         <button
           type="button"
           aria-expanded={section.isOpen}
@@ -354,7 +357,8 @@ export function EntryRow(props: EntryRowProps) {
               canMoveUp={childIdx > 0}
               canMoveDown={childIdx < childEntries.length - 1}
               disableReorder={disableReorder}
-              isEditMode={isEditMode}
+              canEdit={canEdit}
+              isEditMode={effectiveEditMode}
               draggedId={draggedId}
               dragOverId={dragOverId}
               onTrackClick={onTrackClick}
@@ -371,14 +375,16 @@ export function EntryRow(props: EntryRowProps) {
             />
           ))}
 
-          <button
-            type="button"
-            onClick={() => onAddInsideSection(section)}
-            className="flex items-center justify-center gap-1.5 w-full h-11 px-4 rounded-[18px] border border-dashed border-zinc-400 bg-white/80 text-xs font-semibold text-zinc-700 hover:border-black hover:text-black hover:bg-white transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-black"
-          >
-            <Plus className="h-3.5 w-3.5" aria-hidden="true" />
-            <span>Add link to {section.title}</span>
-          </button>
+          {canEdit && (
+            <button
+              type="button"
+              onClick={() => onAddInsideSection(section)}
+              className="flex items-center justify-center gap-1.5 w-full h-11 px-4 rounded-[18px] border border-dashed border-zinc-400 bg-white/80 text-xs font-semibold text-zinc-700 hover:border-black hover:text-black hover:bg-white transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-black"
+            >
+              <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>Add link to {section.title}</span>
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -388,14 +394,25 @@ export function EntryRow(props: EntryRowProps) {
 interface EmptyLinkSlotProps {
   label: string;
   slotIndex: number;
+  canEdit: boolean;
   onAdd: () => void;
 }
 
 export function EmptyLinkSlot({
   label,
   slotIndex,
+  canEdit,
   onAdd,
 }: EmptyLinkSlotProps) {
+  if (!canEdit) {
+    return (
+      <div
+        aria-hidden="true"
+        className="w-full h-[58px] rounded-[22px] empty-slot-gradient"
+      />
+    );
+  }
+
   return (
     <button
       type="button"

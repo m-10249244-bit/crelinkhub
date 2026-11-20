@@ -24,13 +24,33 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    function isOwner(userId) {
-      return isSignedIn()
-        && request.auth.token.email_verified == true
-        && request.auth.uid == userId;
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
     }
 
-    function isValidParentContainer(userId, parentId) {
+    function isOwner(userId) {
+      return isVerifiedUser() && request.auth.uid == userId;
+    }
+
+    function isVaultEditor() {
+      return isVerifiedUser()
+        && (
+          request.auth.token.email == 'm-10249244@moe-dl.edu.my'
+          || exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+        );
+    }
+
+    function isValidVaultParentContainer(vaultId, parentId) {
+      return (
+        exists(/databases/$(database)/documents/vault/$(vaultId)/entries/$(parentId))
+        && get(/databases/$(database)/documents/vault/$(vaultId)/entries/$(parentId)).data.kind in ['folder', 'section']
+      ) || (
+        existsAfter(/databases/$(database)/documents/vault/$(vaultId)/entries/$(parentId))
+        && getAfter(/databases/$(database)/documents/vault/$(vaultId)/entries/$(parentId)).data.kind in ['folder', 'section']
+      );
+    }
+
+    function isValidUserParentContainer(userId, parentId) {
       return (
         exists(/databases/$(database)/documents/users/$(userId)/entries/$(parentId))
         && get(/databases/$(database)/documents/users/$(userId)/entries/$(parentId)).data.kind in ['folder', 'section']
@@ -40,8 +60,65 @@ service cloud.firestore {
       );
     }
 
-    // Validation Blueprint: VaultEntry
-    function isValidVaultEntry(data, userId) {
+    // Validation Blueprint: Public VaultEntry (/vault/{vaultId}/entries/{entryId})
+    function isValidPublicVaultEntry(data, expectedOwnerId) {
+      return data.keys().hasAll([
+          'ownerId', 'isPublic', 'kind', 'columnId', 'parentId', 'title',
+          'url', 'clicks', 'isOpen', 'sortOrder', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'isPublic', 'kind', 'columnId', 'parentId', 'title',
+          'url', 'clicks', 'isOpen', 'sortOrder', 'createdAt', 'updatedAt'
+        ])
+        && data.ownerId is string
+        && isValidId(data.ownerId)
+        && data.ownerId == expectedOwnerId
+        && data.isPublic is bool
+        && data.isPublic == true
+        && data.kind is string
+        && data.kind in ['link', 'folder', 'section']
+        && data.columnId is string
+        && data.columnId in ['CRE', 'JAY', 'OTHER']
+        && data.parentId is string
+        && data.parentId.size() <= 128
+        && (data.parentId == '' || isValidId(data.parentId))
+        && (data.kind != 'folder' || data.parentId == '')
+        && data.title is string
+        && data.title.size() >= 1
+        && data.title.size() <= 80
+        && data.url is string
+        && data.url.size() <= 2048
+        && (data.kind != 'link' || (data.url.size() >= 8 && data.url.matches('^https?://.*')))
+        && (data.kind == 'link' || data.url == '')
+        && data.clicks is int
+        && data.clicks >= 0
+        && data.clicks <= 1000000000
+        && (data.kind == 'link' || data.clicks == 0)
+        && data.isOpen is bool
+        && (data.sortOrder is int || data.sortOrder is float)
+        && data.sortOrder >= -1000000
+        && data.sortOrder <= 1000000000
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // Validation Blueprint: Public ColumnSettings (/vault/{vaultId}/meta/{settingId})
+    function isValidPublicColumnSettings(data, expectedOwnerId) {
+      return data.keys().hasAll(['ownerId', 'isPublic', 'creLabel', 'jayLabel', 'otherLabel', 'updatedAt'])
+        && data.keys().hasOnly(['ownerId', 'isPublic', 'creLabel', 'jayLabel', 'otherLabel', 'updatedAt'])
+        && data.ownerId is string
+        && isValidId(data.ownerId)
+        && data.ownerId == expectedOwnerId
+        && data.isPublic is bool
+        && data.isPublic == true
+        && data.creLabel is string && data.creLabel.size() >= 1 && data.creLabel.size() <= 24
+        && data.jayLabel is string && data.jayLabel.size() >= 1 && data.jayLabel.size() <= 24
+        && data.otherLabel is string && data.otherLabel.size() >= 1 && data.otherLabel.size() <= 24
+        && data.updatedAt is timestamp;
+    }
+
+    // Validation Blueprint: Legacy User VaultEntry (/users/{userId}/entries/{entryId})
+    function isValidLegacyVaultEntry(data, userId) {
       return data.keys().hasAll([
           'ownerId', 'kind', 'columnId', 'parentId', 'title',
           'url', 'clicks', 'isOpen', 'sortOrder', 'createdAt', 'updatedAt'
@@ -80,8 +157,7 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
-    // Validation Blueprint: ColumnSettings
-    function isValidColumnSettings(data, userId) {
+    function isValidLegacyColumnSettings(data, userId) {
       return data.keys().hasAll(['ownerId', 'creLabel', 'jayLabel', 'otherLabel', 'updatedAt'])
         && data.keys().hasOnly(['ownerId', 'creLabel', 'jayLabel', 'otherLabel', 'updatedAt'])
         && data.ownerId is string
@@ -93,31 +169,40 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
-    // User Vault Entries (/users/{userId}/entries/{entryId})
-    match /users/{userId}/entries/{entryId} {
-      allow get: if isValidId(userId) && isValidId(entryId) && isOwner(userId);
-      allow list: if isValidId(userId)
-        && isOwner(userId)
-        && resource.data.ownerId == request.auth.uid;
+    // Admin Allowlist (read-only self check; managed via Firebase console)
+    match /admins/{adminUid} {
+      allow get: if isValidId(adminUid) && isVerifiedUser() && request.auth.uid == adminUid;
+      allow list, create, update, delete: if false;
+    }
 
-      allow create: if isValidId(userId)
+    // Public-Read / Editor-Write Shared Vault (/vault/main/entries/{entryId})
+    match /vault/{vaultId}/entries/{entryId} {
+      allow get: if vaultId == 'main'
         && isValidId(entryId)
-        && isOwner(userId)
-        && isValidVaultEntry(incoming(), userId)
+        && (resource == null || resource.data.isPublic == true);
+
+      allow list: if vaultId == 'main'
+        && resource.data.isPublic == true;
+
+      allow create: if vaultId == 'main'
+        && isValidId(entryId)
+        && isVaultEditor()
+        && isValidPublicVaultEntry(incoming(), request.auth.uid)
         && incoming().parentId != entryId
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time
         && (
           incoming().parentId == ''
-          || isValidParentContainer(userId, incoming().parentId)
+          || isValidVaultParentContainer(vaultId, incoming().parentId)
         );
 
-      allow update: if isValidId(userId)
+      allow update: if vaultId == 'main'
         && isValidId(entryId)
-        && isOwner(userId)
-        && isValidVaultEntry(incoming(), userId)
+        && isVaultEditor()
+        && isValidPublicVaultEntry(incoming(), existing().ownerId)
         && incoming().parentId != entryId
         && incoming().ownerId == existing().ownerId
+        && incoming().isPublic == existing().isPublic
         && incoming().kind == existing().kind
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
@@ -128,7 +213,7 @@ service cloud.firestore {
             && (
               incoming().parentId == ''
               || incoming().parentId == existing().parentId
-              || isValidParentContainer(userId, incoming().parentId)
+              || isValidVaultParentContainer(vaultId, incoming().parentId)
             )
           )
           // Action 2: Reorder / move across scopes
@@ -137,7 +222,7 @@ service cloud.firestore {
             && (
               incoming().parentId == ''
               || incoming().parentId == existing().parentId
-              || isValidParentContainer(userId, incoming().parentId)
+              || isValidVaultParentContainer(vaultId, incoming().parentId)
             )
           )
           // Action 3: Toggle collapsible layer open/closed
@@ -153,12 +238,101 @@ service cloud.firestore {
           )
         );
 
+      allow delete: if vaultId == 'main'
+        && isValidId(entryId)
+        && isVaultEditor();
+    }
+
+    // Public-Read / Editor-Write Column Headings (/vault/main/meta/columns)
+    match /vault/{vaultId}/meta/{settingId} {
+      allow get: if vaultId == 'main'
+        && settingId == 'columns'
+        && (resource == null || resource.data.isPublic == true);
+
+      allow list: if false;
+
+      allow create: if vaultId == 'main'
+        && settingId == 'columns'
+        && isVaultEditor()
+        && isValidPublicColumnSettings(incoming(), request.auth.uid)
+        && incoming().updatedAt == request.time;
+
+      allow update: if vaultId == 'main'
+        && settingId == 'columns'
+        && isVaultEditor()
+        && isValidPublicColumnSettings(incoming(), existing().ownerId)
+        && incoming().ownerId == existing().ownerId
+        && incoming().isPublic == existing().isPublic
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['creLabel', 'jayLabel', 'otherLabel', 'updatedAt']);
+
+      allow delete: if vaultId == 'main'
+        && settingId == 'columns'
+        && isVaultEditor();
+    }
+
+    // Legacy User Vault Entries (/users/{userId}/entries/{entryId})
+    match /users/{userId}/entries/{entryId} {
+      allow get: if isValidId(userId) && isValidId(entryId) && isOwner(userId);
+      allow list: if isValidId(userId)
+        && isOwner(userId)
+        && resource.data.ownerId == request.auth.uid;
+
+      allow create: if isValidId(userId)
+        && isValidId(entryId)
+        && isOwner(userId)
+        && isValidLegacyVaultEntry(incoming(), userId)
+        && incoming().parentId != entryId
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (
+          incoming().parentId == ''
+          || isValidUserParentContainer(userId, incoming().parentId)
+        );
+
+      allow update: if isValidId(userId)
+        && isValidId(entryId)
+        && isOwner(userId)
+        && isValidLegacyVaultEntry(incoming(), userId)
+        && incoming().parentId != entryId
+        && incoming().ownerId == existing().ownerId
+        && incoming().kind == existing().kind
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          (
+            incoming().diff(existing()).affectedKeys().hasOnly(['title', 'url', 'columnId', 'parentId', 'sortOrder', 'updatedAt'])
+            && (
+              incoming().parentId == ''
+              || incoming().parentId == existing().parentId
+              || isValidUserParentContainer(userId, incoming().parentId)
+            )
+          )
+          || (
+            incoming().diff(existing()).affectedKeys().hasOnly(['columnId', 'parentId', 'sortOrder', 'updatedAt'])
+            && (
+              incoming().parentId == ''
+              || incoming().parentId == existing().parentId
+              || isValidUserParentContainer(userId, incoming().parentId)
+            )
+          )
+          || (
+            existing().kind == 'section'
+            && incoming().diff(existing()).affectedKeys().hasOnly(['isOpen', 'updatedAt'])
+          )
+          || (
+            existing().kind == 'link'
+            && incoming().diff(existing()).affectedKeys().hasOnly(['clicks', 'updatedAt'])
+            && incoming().clicks == existing().clicks + 1
+          )
+        );
+
       allow delete: if isValidId(userId)
         && isValidId(entryId)
         && isOwner(userId);
     }
 
-    // User Column Headings (/users/{userId}/meta/{settingId})
+    // Legacy User Column Headings (/users/{userId}/meta/{settingId})
     match /users/{userId}/meta/{settingId} {
       allow get: if isValidId(userId) && settingId == 'columns' && isOwner(userId);
       allow list: if false;
@@ -166,13 +340,13 @@ service cloud.firestore {
       allow create: if isValidId(userId)
         && settingId == 'columns'
         && isOwner(userId)
-        && isValidColumnSettings(incoming(), userId)
+        && isValidLegacyColumnSettings(incoming(), userId)
         && incoming().updatedAt == request.time;
 
       allow update: if isValidId(userId)
         && settingId == 'columns'
         && isOwner(userId)
-        && isValidColumnSettings(incoming(), userId)
+        && isValidLegacyColumnSettings(incoming(), userId)
         && incoming().ownerId == existing().ownerId
         && incoming().updatedAt == request.time
         && incoming().diff(existing()).affectedKeys().hasOnly(['creLabel', 'jayLabel', 'otherLabel', 'updatedAt']);
