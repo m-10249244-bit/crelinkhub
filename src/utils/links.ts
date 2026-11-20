@@ -667,6 +667,42 @@ export function fromFirestoreEntryDoc(
   return list[0] ?? null;
 }
 
+export function parseFirestoreRestFields(
+  fields: Record<string, Record<string, unknown>> | undefined
+): Record<string, unknown> {
+  if (!fields || typeof fields !== 'object') return {};
+  const result: Record<string, unknown> = {};
+  for (const [key, typedVal] of Object.entries(fields)) {
+    if (!typedVal || typeof typedVal !== 'object') continue;
+    if ('stringValue' in typedVal && typeof typedVal.stringValue === 'string') {
+      result[key] = typedVal.stringValue;
+    } else if ('booleanValue' in typedVal && typeof typedVal.booleanValue === 'boolean') {
+      result[key] = typedVal.booleanValue;
+    } else if ('integerValue' in typedVal) {
+      const n = Number(typedVal.integerValue);
+      if (Number.isFinite(n)) result[key] = n;
+    } else if ('doubleValue' in typedVal) {
+      const n = Number(typedVal.doubleValue);
+      if (Number.isFinite(n)) result[key] = n;
+    } else if ('timestampValue' in typedVal && typeof typedVal.timestampValue === 'string') {
+      const ms = Date.parse(typedVal.timestampValue);
+      result[key] = Number.isFinite(ms) ? ms : Date.now();
+    }
+  }
+  return result;
+}
+
+export function fromFirestoreRestEntryDoc(doc: {
+  name?: string;
+  fields?: Record<string, Record<string, unknown>>;
+}): VaultEntry | null {
+  if (!doc.name || !doc.fields) return null;
+  const segments = doc.name.split('/');
+  const docId = segments[segments.length - 1];
+  if (!docId) return null;
+  return fromFirestoreEntryDoc(docId, parseFirestoreRestFields(doc.fields));
+}
+
 export function parseImportedBackup(rawJson: string): {
   entries: VaultEntry[];
   columns: ColumnConfig[];

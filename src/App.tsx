@@ -12,6 +12,7 @@ import {
   checkUserEditorAccess,
   createVaultEntryInCloud,
   deleteVaultEntriesInCloud,
+  fetchPublicVaultOnce,
   initializePublicVaultIfNeeded,
   reorderVaultEntriesInCloud,
   replaceAllVaultDataInCloud,
@@ -76,10 +77,20 @@ function loadFallbackColumns(): ColumnConfig[] {
   }
 }
 
+function isCriticalCloudError(err: Error): boolean {
+  const msg = err.message;
+  return (
+    msg.includes('Missing or insufficient permissions') ||
+    msg.includes('permission-denied') ||
+    msg.includes('Quota exceeded')
+  );
+}
+
 export default function App() {
-  const [entries, setEntries] = useState<VaultEntry[]>(loadFallbackEntries);
+  const [entries, setEntries] = useState<VaultEntry[]>([]);
   const [columns, setColumns] = useState<ColumnConfig[]>(loadFallbackColumns);
-  const [cloudMetaInitialized, setCloudMetaInitialized] = useState(false);
+  const [cloudLoaded, setCloudLoaded] = useState(false);
+  const [, setCloudMetaInitialized] = useState(false);
   const [localSectionOpenMap, setLocalSectionOpenMap] = useState<Record<string, boolean>>({});
   const [searchQuery, setSearchQuery] = useState('');
   const [mobileColumn, setMobileColumn] = useState<ColumnId>('CRE');
@@ -112,6 +123,9 @@ export default function App() {
   const [asyncError, setAsyncError] = useState<Error | null>(null);
   const initializedUidRef = useRef<Set<string>>(new Set());
   const cloudInitializedRef = useRef(false);
+  const snapshotAppliedRef = useRef(false);
+  const cloudFetchSucceededRef = useRef(false);
+  const pendingSubscriptionErrorRef = useRef<Error | null>(null);
 
   if (asyncError) {
     throw asyncError;
@@ -120,29 +134,79 @@ export default function App() {
   const canEdit = Boolean(user && user.emailVerified && hasEditorAccess);
   const effectiveEditMode = canEdit && isEditMode;
 
-  // Always subscribe to public-read vault data so visitors without login can view all links
+  // Fetch public-read vault data immediately (with HTTPS REST fallback) + keep live listeners active
   useEffect(() => {
+    let active = true;
+
+    const handleSubscriptionError = (err: Error) => {
+      if (!active) return;
+      if (isCriticalCloudError(err)) {
+        setAsyncError(err);
+        return;
+      }
+      if (!cloudFetchSucceededRef.current) {
+        pendingSubscriptionErrorRef.current = err;
+      }
+    };
+
+    void fetchPublicVaultOnce()
+      .then((result) => {
+        if (!active) return;
+        cloudFetchSucceededRef.current = true;
+        pendingSubscriptionErrorRef.current = null;
+        if (!snapshotAppliedRef.current) {
+          cloudInitializedRef.current = result.initialized;
+          setCloudMetaInitialized(result.initialized);
+          if (result.entries.length > 0 || result.initialized) {
+            setEntries(result.entries);
+            setColumns(result.columns);
+          } else {
+            setEntries(loadFallbackEntries());
+            setColumns(loadFallbackColumns());
+          }
+          setCloudLoaded(true);
+        }
+      })
+      .catch((err) => {
+        if (!active) return;
+        const resolved = err instanceof Error ? err : new Error(String(err));
+        if (!snapshotAppliedRef.current) {
+          setAsyncError(resolved);
+        } else if (pendingSubscriptionErrorRef.current) {
+          setAsyncError(pendingSubscriptionErrorRef.current);
+        }
+      });
+
     const unsubEntries = subscribeToPublicVaultEntries(
       (cloudEntries) => {
+        if (!active) return;
         if (cloudEntries.length > 0 || cloudInitializedRef.current) {
+          snapshotAppliedRef.current = true;
+          cloudFetchSucceededRef.current = true;
           setEntries(cloudEntries);
+          setCloudLoaded(true);
         }
       },
-      (err) => setAsyncError(err)
+      handleSubscriptionError
     );
 
     const unsubColumns = subscribeToPublicColumnSettings(
       (cloudColumns, initialized) => {
+        if (!active) return;
         cloudInitializedRef.current = initialized;
         setCloudMetaInitialized(initialized);
         if (initialized) {
+          snapshotAppliedRef.current = true;
+          cloudFetchSucceededRef.current = true;
           setColumns(cloudColumns);
+          setCloudLoaded(true);
         }
       },
-      (err) => setAsyncError(err)
+      handleSubscriptionError
     );
 
     return () => {
+      active = false;
       unsubEntries();
       unsubColumns();
     };
@@ -203,16 +267,16 @@ export default function App() {
 
   // Initialize / migrate public vault once when an authorized editor signs in
   useEffect(() => {
-    if (!canEdit || !user) return;
+    if (!canEdit || !user || !cloudLoaded) return;
     if (initializedUidRef.current.has(user.uid)) return;
     initializedUidRef.current.add(user.uid);
 
     void initializePublicVaultIfNeeded(user.uid, entries, columns).catch((err) => {
       setAsyncError(err instanceof Error ? err : new Error(String(err)));
     });
-    // Intentionally keyed to verified editor UID for one-time initialization
+    // Intentionally keyed to verified editor UID + initial cloud load completion
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [canEdit, user?.uid]);
+  }, [canEdit, user?.uid, cloudLoaded]);
 
   // Apply local expand/collapse overrides when visitors browse without edit rights
   const displayEntries = useMemo(() => {
@@ -282,7 +346,17 @@ export default function App() {
         err && typeof err === 'object' && 'code' in err
           ? String((err as { code: unknown }).code)
           : '';
-      if (
+      if (code === 'auth/unauthorized-domain') {
+        const host =
+          typeof window !== 'undefined' ? window.location.hostname : 'this domain';
+        setAuthNotice(
+          `Domain "${host}" is not authorized for Google Sign-In yet. Add "${host}" in Firebase Console → Authentication → Settings → Authorized domains.`
+        );
+      } else if (code === 'auth/popup-blocked') {
+        setAuthNotice(
+          'Sign-in popup was blocked by your browser. Please allow popups for this site and try again.'
+        );
+      } else if (
         code !== 'auth/popup-closed-by-user' &&
         code !== 'auth/cancelled-popup-request'
       ) {
@@ -619,7 +693,7 @@ export default function App() {
         onOpenBackupModal={() => {
           if (canEdit) setBackupModalOpen(true);
         }}
-        totalLinks={totalLinksCount}
+        totalLinks={cloudLoaded ? totalLinksCount : null}
         user={user}
         authReady={authReady}
         authBusy={authBusy}
@@ -847,7 +921,8 @@ export default function App() {
                           : 'text-zinc-700 hover:text-black'
                       }`}
                     >
-                      {col.label} ({count})
+                      {col.label}
+                      {cloudLoaded ? ` (${count})` : ''}
                     </button>
                   );
                 })}
@@ -856,11 +931,12 @@ export default function App() {
 
             <div className="flex-1 grid grid-cols-1 md:grid-cols-3">
               {columns.map((col, colIndex) => {
-                const colEntries = getScopeEntries(displayEntries, col.id, null);
-                const emptyCount = Math.max(
-                  0,
-                  MIN_SLOTS_PER_COLUMN - colEntries.length
-                );
+                const colEntries = cloudLoaded
+                  ? getScopeEntries(displayEntries, col.id, null)
+                  : [];
+                const emptyCount = cloudLoaded
+                  ? Math.max(0, MIN_SLOTS_PER_COLUMN - colEntries.length)
+                  : MIN_SLOTS_PER_COLUMN;
                 const isLastCol = colIndex === columns.length - 1;
                 const isVisibleOnMobile = mobileColumn === col.id;
                 const isDropHighlight = effectiveEditMode && dragOverColumnId === col.id;
@@ -909,7 +985,11 @@ export default function App() {
                     </div>
 
                     {/* Entries Stack */}
-                    <div className="flex-1 px-5 sm:px-7 py-6 space-y-4">
+                    <div
+                      className={`flex-1 px-5 sm:px-7 py-6 space-y-4 ${
+                        !cloudLoaded ? 'animate-pulse' : ''
+                      }`}
+                    >
                       {colEntries.map((entry, idx) => (
                         <EntryRow
                           key={entry.id}
@@ -926,7 +1006,7 @@ export default function App() {
                           key={`${col.id}-empty-${idx}`}
                           label={col.label}
                           slotIndex={colEntries.length + idx}
-                          canEdit={canEdit}
+                          canEdit={cloudLoaded && canEdit}
                           onAdd={() => openAddModal(col.id, null, 'link')}
                         />
                       ))}

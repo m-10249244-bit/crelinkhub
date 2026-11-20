@@ -3,7 +3,9 @@ import {
   collection,
   doc,
   getDoc,
+  getDocFromServer,
   getDocs,
+  getDocsFromServer,
   increment,
   onSnapshot,
   query,
@@ -14,15 +16,17 @@ import {
   writeBatch,
   type Unsubscribe,
 } from 'firebase/firestore';
-import { OperationType, db, handleFirestoreError } from '../firebase';
+import { OperationType, db, firebaseConfig, handleFirestoreError } from '../firebase';
 import {
   DEFAULT_COLUMNS,
   MAX_COLUMN_LABEL_LENGTH,
   MAX_TITLE_LENGTH,
   MAX_URL_LENGTH,
   fromFirestoreEntryDoc,
+  fromFirestoreRestEntryDoc,
   isAuthorizedEditorEmail,
   normalizeUrl,
+  parseFirestoreRestFields,
   sanitizeColumns,
   sanitizeEntryId,
   sortEntriesByOrder,
@@ -86,6 +90,142 @@ export async function checkUserEditorAccess(user: User | null): Promise<boolean>
     return snap.exists();
   } catch (error) {
     handleFirestoreError(error, OperationType.GET, path);
+  }
+}
+
+async function fetchPublicVaultViaRest(): Promise<{
+  entries: VaultEntry[];
+  columns: ColumnConfig[];
+  initialized: boolean;
+}> {
+  const { projectId, firestoreDatabaseId, apiKey } = firebaseConfig;
+  const baseUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+    projectId
+  )}/databases/${encodeURIComponent(firestoreDatabaseId)}/documents/vault/${PUBLIC_VAULT_ID}`;
+
+  const [colsRes, entriesRes] = await Promise.all([
+    fetch(`${baseUrl}/meta/columns?key=${encodeURIComponent(apiKey)}`),
+    fetch(`${baseUrl}:runQuery?key=${encodeURIComponent(apiKey)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        structuredQuery: {
+          from: [{ collectionId: 'entries' }],
+          where: {
+            fieldFilter: {
+              field: { fieldPath: 'isPublic' },
+              op: 'EQUAL',
+              value: { booleanValue: true },
+            },
+          },
+        },
+      }),
+    }),
+  ]);
+
+  let columns = DEFAULT_COLUMNS;
+  let initialized = false;
+
+  if (colsRes.status === 200) {
+    const colsJson = (await colsRes.json()) as {
+      fields?: Record<string, Record<string, unknown>>;
+    };
+    const parsedCols = parseFirestoreRestFields(colsJson.fields);
+    columns = sanitizeColumns([
+      { id: 'CRE', label: parsedCols.creLabel },
+      { id: 'JAY', label: parsedCols.jayLabel },
+      { id: 'OTHER', label: parsedCols.otherLabel },
+    ]);
+    initialized = true;
+  } else if (colsRes.status !== 404) {
+    const errText = await colsRes.text();
+    throw new Error(`Firestore REST columns error (${colsRes.status}): ${errText}`);
+  }
+
+  if (!entriesRes.ok) {
+    const errText = await entriesRes.text();
+    throw new Error(`Firestore REST entries error (${entriesRes.status}): ${errText}`);
+  }
+
+  const rows = (await entriesRes.json()) as Array<{
+    document?: {
+      name?: string;
+      fields?: Record<string, Record<string, unknown>>;
+    };
+  }>;
+
+  const entries: VaultEntry[] = [];
+  for (const row of rows) {
+    if (!row.document) continue;
+    const entry = fromFirestoreRestEntryDoc(row.document);
+    if (entry) entries.push(entry);
+  }
+
+  return {
+    entries: sortEntriesByOrder(entries),
+    columns,
+    initialized,
+  };
+}
+
+const SDK_SERVER_FETCH_TIMEOUT_MS = 2000;
+
+export async function fetchPublicVaultOnce(): Promise<{
+  entries: VaultEntry[];
+  columns: ColumnConfig[];
+  initialized: boolean;
+}> {
+  const path = `vault/${PUBLIC_VAULT_ID}/entries`;
+  try {
+    const sdkFetchPromise = Promise.all([
+      getDocsFromServer(
+        query(
+          collection(db, 'vault', PUBLIC_VAULT_ID, 'entries'),
+          where('isPublic', '==', true)
+        )
+      ),
+      getDocFromServer(doc(db, 'vault', PUBLIC_VAULT_ID, 'meta', 'columns')),
+    ]);
+
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error('Firestore server fetch timed out')), SDK_SERVER_FETCH_TIMEOUT_MS);
+    });
+
+    const [entriesSnap, colsSnap] = await Promise.race([sdkFetchPromise, timeoutPromise]);
+
+    const parsed: VaultEntry[] = [];
+    entriesSnap.forEach((docSnap) => {
+      const entry = fromFirestoreEntryDoc(docSnap.id, docSnap.data());
+      if (entry) parsed.push(entry);
+    });
+
+    let columns = DEFAULT_COLUMNS;
+    let initialized = false;
+    if (colsSnap.exists()) {
+      const data = colsSnap.data();
+      columns = sanitizeColumns([
+        { id: 'CRE', label: data.creLabel },
+        { id: 'JAY', label: data.jayLabel },
+        { id: 'OTHER', label: data.otherLabel },
+      ]);
+      initialized = true;
+    }
+
+    return {
+      entries: sortEntriesByOrder(parsed),
+      columns,
+      initialized,
+    };
+  } catch (sdkError) {
+    const msg = sdkError instanceof Error ? sdkError.message : String(sdkError);
+    if (msg.includes('Missing or insufficient permissions') || msg.includes('permission-denied')) {
+      handleFirestoreError(sdkError, OperationType.LIST, path);
+    }
+    try {
+      return await fetchPublicVaultViaRest();
+    } catch (restError) {
+      handleFirestoreError(restError, OperationType.LIST, path);
+    }
   }
 }
 

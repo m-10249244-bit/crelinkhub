@@ -10,7 +10,7 @@ interface HeaderBarProps {
   onToggleEditMode: () => void;
   onOpenAddModal: () => void;
   onOpenBackupModal: () => void;
-  totalLinks: number;
+  totalLinks: number | null;
   user: User | null;
   authReady: boolean;
   authBusy: boolean;
@@ -59,7 +59,7 @@ export function HeaderBar({
                 type="search"
                 value={searchQuery}
                 onChange={(e) => onSearchChange(e.target.value)}
-                placeholder={`Search ${totalLinks} links...`}
+                placeholder={totalLinks === null ? 'Search links...' : `Search ${totalLinks} links...`}
                 aria-label="Search saved links"
                 className="w-full h-10 pl-9 pr-8 text-sm bg-white/90 border border-zinc-300 rounded-lg text-zinc-950 placeholder:text-zinc-500 focus:outline-none focus:border-black focus:bg-white transition-colors"
               />

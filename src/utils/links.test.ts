@@ -6,10 +6,12 @@ import {
   extractDomain,
   filterEntries,
   fromFirestoreEntryDoc,
+  fromFirestoreRestEntryDoc,
   isAuthorizedEditorEmail,
   moveEntryInScope,
   moveEntryToScope,
   normalizeUrl,
+  parseFirestoreRestFields,
   parseImportedBackup,
   reorderEntryOntoTarget,
   sanitizeEntries,
@@ -190,5 +192,37 @@ test('Firestore payload mapping enforces blueprint constraints and sortOrder rou
   assert.equal(isAuthorizedEditorEmail('M-10249244@MOE-DL.EDU.MY '), true);
   assert.equal(isAuthorizedEditorEmail('visitor@example.com'), false);
   assert.equal(isAuthorizedEditorEmail(null), false);
+
+  const restFields = parseFirestoreRestFields({
+    creLabel: { stringValue: 'BUSINESS' },
+    jayLabel: { stringValue: 'HOME' },
+    otherLabel: { stringValue: 'OTHER' },
+    isPublic: { booleanValue: true },
+  });
+  assert.equal(restFields.creLabel, 'BUSINESS');
+  assert.equal(restFields.isPublic, true);
+
+  const restEntry = fromFirestoreRestEntryDoc({
+    name: 'projects/p1/databases/db1/documents/vault/main/entries/link-rest-1',
+    fields: {
+      kind: { stringValue: 'link' },
+      columnId: { stringValue: 'OTHER' },
+      parentId: { stringValue: '' },
+      title: { stringValue: 'Discord' },
+      url: { stringValue: 'https://discord.gg/abc' },
+      clicks: { integerValue: '3' },
+      sortOrder: { doubleValue: 2 },
+      createdAt: { timestampValue: '2026-11-20T12:00:00.000Z' },
+    },
+  });
+  assert.ok(restEntry);
+  assert.equal(restEntry.id, 'link-rest-1');
+  assert.equal(restEntry.kind, 'link');
+  assert.equal(restEntry.parentId, null);
+  assert.equal(restEntry.sortOrder, 2);
+  if (restEntry.kind === 'link') {
+    assert.equal(restEntry.clicks, 3);
+    assert.equal(restEntry.url, 'https://discord.gg/abc');
+  }
 });
 
