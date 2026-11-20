@@ -1,0 +1,183 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net (Default Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Global Helpers
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn()
+        && request.auth.token.email_verified == true
+        && request.auth.uid == userId;
+    }
+
+    function isValidParentContainer(userId, parentId) {
+      return (
+        exists(/databases/$(database)/documents/users/$(userId)/entries/$(parentId))
+        && get(/databases/$(database)/documents/users/$(userId)/entries/$(parentId)).data.kind in ['folder', 'section']
+      ) || (
+        existsAfter(/databases/$(database)/documents/users/$(userId)/entries/$(parentId))
+        && getAfter(/databases/$(database)/documents/users/$(userId)/entries/$(parentId)).data.kind in ['folder', 'section']
+      );
+    }
+
+    // Validation Blueprint: VaultEntry
+    function isValidVaultEntry(data, userId) {
+      return data.keys().hasAll([
+          'ownerId', 'kind', 'columnId', 'parentId', 'title',
+          'url', 'clicks', 'isOpen', 'sortOrder', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'kind', 'columnId', 'parentId', 'title',
+          'url', 'clicks', 'isOpen', 'sortOrder', 'createdAt', 'updatedAt'
+        ])
+        && data.ownerId is string
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && data.kind is string
+        && data.kind in ['link', 'folder', 'section']
+        && data.columnId is string
+        && data.columnId in ['CRE', 'JAY', 'OTHER']
+        && data.parentId is string
+        && data.parentId.size() <= 128
+        && (data.parentId == '' || isValidId(data.parentId))
+        && (data.kind != 'folder' || data.parentId == '')
+        && data.title is string
+        && data.title.size() >= 1
+        && data.title.size() <= 80
+        && data.url is string
+        && data.url.size() <= 2048
+        && (data.kind != 'link' || (data.url.size() >= 8 && data.url.matches('^https?://.*')))
+        && (data.kind == 'link' || data.url == '')
+        && data.clicks is int
+        && data.clicks >= 0
+        && data.clicks <= 1000000000
+        && (data.kind == 'link' || data.clicks == 0)
+        && data.isOpen is bool
+        && (data.sortOrder is int || data.sortOrder is float)
+        && data.sortOrder >= -1000000
+        && data.sortOrder <= 1000000000
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // Validation Blueprint: ColumnSettings
+    function isValidColumnSettings(data, userId) {
+      return data.keys().hasAll(['ownerId', 'creLabel', 'jayLabel', 'otherLabel', 'updatedAt'])
+        && data.keys().hasOnly(['ownerId', 'creLabel', 'jayLabel', 'otherLabel', 'updatedAt'])
+        && data.ownerId is string
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && data.creLabel is string && data.creLabel.size() >= 1 && data.creLabel.size() <= 24
+        && data.jayLabel is string && data.jayLabel.size() >= 1 && data.jayLabel.size() <= 24
+        && data.otherLabel is string && data.otherLabel.size() >= 1 && data.otherLabel.size() <= 24
+        && data.updatedAt is timestamp;
+    }
+
+    // User Vault Entries (/users/{userId}/entries/{entryId})
+    match /users/{userId}/entries/{entryId} {
+      allow get: if isValidId(userId) && isValidId(entryId) && isOwner(userId);
+      allow list: if isValidId(userId)
+        && isOwner(userId)
+        && resource.data.ownerId == request.auth.uid;
+
+      allow create: if isValidId(userId)
+        && isValidId(entryId)
+        && isOwner(userId)
+        && isValidVaultEntry(incoming(), userId)
+        && incoming().parentId != entryId
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (
+          incoming().parentId == ''
+          || isValidParentContainer(userId, incoming().parentId)
+        );
+
+      allow update: if isValidId(userId)
+        && isValidId(entryId)
+        && isOwner(userId)
+        && isValidVaultEntry(incoming(), userId)
+        && incoming().parentId != entryId
+        && incoming().ownerId == existing().ownerId
+        && incoming().kind == existing().kind
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Action 1: Edit entry details & location
+          (
+            incoming().diff(existing()).affectedKeys().hasOnly(['title', 'url', 'columnId', 'parentId', 'sortOrder', 'updatedAt'])
+            && (
+              incoming().parentId == ''
+              || incoming().parentId == existing().parentId
+              || isValidParentContainer(userId, incoming().parentId)
+            )
+          )
+          // Action 2: Reorder / move across scopes
+          || (
+            incoming().diff(existing()).affectedKeys().hasOnly(['columnId', 'parentId', 'sortOrder', 'updatedAt'])
+            && (
+              incoming().parentId == ''
+              || incoming().parentId == existing().parentId
+              || isValidParentContainer(userId, incoming().parentId)
+            )
+          )
+          // Action 3: Toggle collapsible layer open/closed
+          || (
+            existing().kind == 'section'
+            && incoming().diff(existing()).affectedKeys().hasOnly(['isOpen', 'updatedAt'])
+          )
+          // Action 4: Track link click count (+1)
+          || (
+            existing().kind == 'link'
+            && incoming().diff(existing()).affectedKeys().hasOnly(['clicks', 'updatedAt'])
+            && incoming().clicks == existing().clicks + 1
+          )
+        );
+
+      allow delete: if isValidId(userId)
+        && isValidId(entryId)
+        && isOwner(userId);
+    }
+
+    // User Column Headings (/users/{userId}/meta/{settingId})
+    match /users/{userId}/meta/{settingId} {
+      allow get: if isValidId(userId) && settingId == 'columns' && isOwner(userId);
+      allow list: if false;
+
+      allow create: if isValidId(userId)
+        && settingId == 'columns'
+        && isOwner(userId)
+        && isValidColumnSettings(incoming(), userId)
+        && incoming().updatedAt == request.time;
+
+      allow update: if isValidId(userId)
+        && settingId == 'columns'
+        && isOwner(userId)
+        && isValidColumnSettings(incoming(), userId)
+        && incoming().ownerId == existing().ownerId
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['creLabel', 'jayLabel', 'otherLabel', 'updatedAt']);
+
+      allow delete: if isValidId(userId) && settingId == 'columns' && isOwner(userId);
+    }
+  }
+}

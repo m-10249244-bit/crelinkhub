@@ -1,0 +1,56 @@
+@import "tailwindcss";
+
+@theme {
+  --font-display: "DynaPuff", system-ui, sans-serif;
+  --font-sans: "Plus Jakarta Sans", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+}
+
+@layer base {
+  html {
+    font-family: var(--font-sans);
+    color: #09090b;
+    background-color: #ffffff;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+.sticker-text {
+  font-family: var(--font-display);
+  paint-order: stroke fill;
+  -webkit-text-stroke: 5px #000000;
+  color: #ffffff;
+  letter-spacing: 0.04em;
+}
+
+.sticker-text-sm {
+  font-family: var(--font-display);
+  paint-order: stroke fill;
+  -webkit-text-stroke: 3.5px #000000;
+  color: #ffffff;
+  letter-spacing: 0.04em;
+}
+
+.empty-slot-gradient {
+  background: linear-gradient(90deg, #a1a1aa 0%, #d4d4d8 48%, rgba(255, 255, 255, 0.72) 100%);
+}
+
+.empty-slot-gradient:hover {
+  background: linear-gradient(90deg, #8b8b95 0%, #c4c4cc 55%, rgba(244, 244, 245, 0.92) 100%);
+}
+
+.filled-slot-gradient {
+  background: linear-gradient(90deg, #f4f4f5 0%, #fafafa 60%, #ffffff 100%);
+}
+
+.filled-slot-gradient:hover {
+  background: linear-gradient(90deg, #e4e4e7 0%, #f4f4f5 65%, #ffffff 100%);
+}

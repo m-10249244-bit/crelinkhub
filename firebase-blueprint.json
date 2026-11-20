@@ -1,0 +1,135 @@
+{
+  "entities": {
+    "VaultEntry": {
+      "title": "VaultEntry",
+      "description": "A saved link, single-page folder, or expandable/collapsible layer belonging to a user's JAYTINSTORE vault.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the vault owner.",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["link", "folder", "section"],
+          "description": "Entry type: direct clickable link, single-page folder, or collapsible layer."
+        },
+        "columnId": {
+          "type": "string",
+          "enum": ["CRE", "JAY", "OTHER"],
+          "description": "Column identifier where this entry lives."
+        },
+        "parentId": {
+          "type": "string",
+          "description": "ID of parent folder or collapsible layer, or empty string for top-level entries.",
+          "maxLength": 128
+        },
+        "title": {
+          "type": "string",
+          "description": "Display name of the link, folder, or layer.",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "url": {
+          "type": "string",
+          "description": "Normalized http/https URL for links, or empty string for folders/layers.",
+          "maxLength": 2048
+        },
+        "clicks": {
+          "type": "integer",
+          "description": "Click count for link entries."
+        },
+        "isOpen": {
+          "type": "boolean",
+          "description": "Expanded state for collapsible layer entries."
+        },
+        "sortOrder": {
+          "type": "number",
+          "description": "Numeric ordering weight within the column or parent container."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when last updated."
+        }
+      },
+      "required": [
+        "ownerId",
+        "kind",
+        "columnId",
+        "parentId",
+        "title",
+        "url",
+        "clicks",
+        "isOpen",
+        "sortOrder",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ColumnSettings": {
+      "title": "ColumnSettings",
+      "description": "Custom headings for the three JAYTINSTORE columns.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the vault owner.",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "creLabel": {
+          "type": "string",
+          "description": "Display heading for column 1.",
+          "minLength": 1,
+          "maxLength": 24
+        },
+        "jayLabel": {
+          "type": "string",
+          "description": "Display heading for column 2.",
+          "minLength": 1,
+          "maxLength": 24
+        },
+        "otherLabel": {
+          "type": "string",
+          "description": "Display heading for column 3.",
+          "minLength": 1,
+          "maxLength": 24
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when headings were updated."
+        }
+      },
+      "required": [
+        "ownerId",
+        "creLabel",
+        "jayLabel",
+        "otherLabel",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}/entries/{entryId}": {
+      "schema": {
+        "$ref": "#/entities/VaultEntry"
+      },
+      "description": "Stores a user's links, folders, and collapsible layers."
+    },
+    "/users/{userId}/meta/{settingId}": {
+      "schema": {
+        "$ref": "#/entities/ColumnSettings"
+      },
+      "description": "Stores a user's customized column headings (document id: columns)."
+    }
+  }
+}
